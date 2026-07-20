@@ -1,0 +1,218 @@
+"""
+@kennydeebot — Telegram Dictionary Bot
+----------------------------------------
+Looks up English word definitions using the free dictionaryapi.dev API.
+
+Setup:
+1. pip install -r requirements.txt
+2. Get the bot token for @kennydeebot from @BotFather on Telegram
+3. Set the TELEGRAM_BOT_TOKEN environment variable (or paste it below)
+4. Run: python bot.py
+
+Usage in Telegram (search @kennydeebot to find it):
+- /start        -> welcome message
+- /help         -> how to use the bot
+- /about        -> about this bot
+- /define word  -> look up a word
+- Or just type any word directly (no command needed)
+"""
+
+import logging
+import os
+import requests
+
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+# Prefer an environment variable so you never hardcode your token in code
+# you might share or commit to git. Falls back to a placeholder string.
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
+BOT_USERNAME = "@kennydeebot"
+
+DICTIONARY_API_URL = "https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Core lookup logic
+# ---------------------------------------------------------------------------
+
+def fetch_definition(word: str) -> str:
+    """Fetch and format a definition for `word`. Returns a Telegram-ready string."""
+    try:
+        response = requests.get(DICTIONARY_API_URL.format(word=word), timeout=10)
+    except requests.RequestException as exc:
+        logger.error("Network error fetching '%s': %s", word, exc)
+        return "⚠️ Network error — please try again in a moment."
+
+    if response.status_code == 404:
+        return f"❌ No definition found for *{escape_markdown(word)}*."
+
+    if response.status_code != 200:
+        return "⚠️ The dictionary service returned an unexpected error. Try again later."
+
+    try:
+        data = response.json()
+    except ValueError:
+        return "⚠️ Couldn't parse the dictionary response."
+
+    return format_entry(data)
+
+
+def format_entry(data: list) -> str:
+    """Turn the raw API JSON into a readable, Markdown-formatted message."""
+    if not data:
+        return "❌ No definition found."
+
+    entry = data[0]
+    word = entry.get("word", "")
+    phonetic = entry.get("phonetic", "")
+
+    lines = [f"📖 *{escape_markdown(word)}*"]
+    if phonetic:
+        lines.append(f"_{escape_markdown(phonetic)}_")
+    lines.append("")
+
+    for meaning in entry.get("meanings", []):
+        part_of_speech = meaning.get("partOfSpeech", "")
+        lines.append(f"*{part_of_speech.capitalize()}*")
+
+        definitions = meaning.get("definitions", [])
+        for i, d in enumerate(definitions[:3], start=1):  # cap at 3 per POS
+            definition_text = escape_markdown(d.get("definition", ""))
+            lines.append(f"  {i}. {definition_text}")
+            example = d.get("example")
+            if example:
+                lines.append(f"     _e.g._ \"{escape_markdown(example)}\"")
+
+        synonyms = meaning.get("synonyms", [])
+        if synonyms:
+            syn_text = ", ".join(synonyms[:5])
+            lines.append(f"  🔄 Synonyms: {escape_markdown(syn_text)}")
+
+        lines.append("")
+
+    # Telegram messages have a 4096-char limit; trim just in case
+    message = "\n".join(lines).strip()
+    if len(message) > 4000:
+        message = message[:4000] + "\n\n…(truncated)"
+    return message
+
+
+def escape_markdown(text: str) -> str:
+    """Escape characters that break Telegram's legacy Markdown parser."""
+    for ch in ["_", "*", "`", "["]:
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Telegram handlers
+# ---------------------------------------------------------------------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_first_name = update.effective_user.first_name if update.effective_user else ""
+    greeting = f"👋 Hi {user_first_name}!" if user_first_name else "👋 Hi!"
+    await update.message.reply_text(
+        f"{greeting} I'm *{BOT_USERNAME}*, your dictionary bot.\n\n"
+        "Send me any English word and I'll give you its definition, "
+        "or use /define <word>.\n\n"
+        "Type /help for more info.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        f"*How to use {BOT_USERNAME}*\n\n"
+        "• Just type a word, e.g. `hello`\n"
+        "• Or use `/define hello`\n\n"
+        "I'll reply with the definition(s), part of speech, "
+        "an example if available, and synonyms.\n\n"
+        "Type /about to learn more about this bot.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        f"*{BOT_USERNAME}*\n\n"
+        "A simple, free English dictionary bot on Telegram.\n"
+        "Definitions are sourced from the dictionaryapi.dev database.\n\n"
+        "Commands: /start /help /about /define",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def define_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Usage: /define <word>\nExample: /define serendipity")
+        return
+
+    word = " ".join(context.args).strip()
+    await lookup_and_reply(update, word)
+
+
+async def handle_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    word = update.message.text.strip()
+    # Ignore anything that isn't a single word-ish token, to avoid API spam
+    if not word or len(word.split()) > 3:
+        await update.message.reply_text(
+            "Send me a single word to look up, or use /define <word>."
+        )
+        return
+    await lookup_and_reply(update, word)
+
+
+async def lookup_and_reply(update: Update, word: str) -> None:
+    await update.message.chat.send_action(action="typing")
+    result = fetch_definition(word)
+    await update.message.reply_text(result, parse_mode=ParseMode.MARKDOWN)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Update %s caused error: %s", update, context.error)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    if BOT_TOKEN == "PUT_YOUR_TOKEN_HERE":
+        raise SystemExit(
+            "Please set the TELEGRAM_BOT_TOKEN environment variable "
+            "(or edit BOT_TOKEN in bot.py) with the token from @BotFather."
+        )
+
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("about", about_command))
+    application.add_handler(CommandHandler("define", define_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_plain_text))
+    application.add_error_handler(error_handler)
+
+    logger.info("Bot starting...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
