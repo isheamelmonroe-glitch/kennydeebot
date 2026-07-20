@@ -2,12 +2,19 @@
 @kennydeebot — Telegram Dictionary Bot
 ----------------------------------------
 Looks up English word definitions using the free dictionaryapi.dev API.
+Built to deploy on Railway from a GitHub repo.
 
-Setup:
+Local setup:
 1. pip install -r requirements.txt
 2. Get the bot token for @kennydeebot from @BotFather on Telegram
-3. Set the TELEGRAM_BOT_TOKEN environment variable (or paste it below)
+3. Set the TELEGRAM_BOT_TOKEN environment variable
 4. Run: python bot.py
+
+Railway deployment:
+- Push this project to a GitHub repo
+- Create a new Railway project from that repo
+- In Railway's dashboard, add an environment variable: TELEGRAM_BOT_TOKEN
+- Railway will run the Procfile automatically (worker: python bot.py)
 
 Usage in Telegram (search @kennydeebot to find it):
 - /start        -> welcome message
@@ -19,6 +26,7 @@ Usage in Telegram (search @kennydeebot to find it):
 
 import logging
 import os
+import sys
 import requests
 
 from telegram import Update
@@ -35,9 +43,9 @@ from telegram.ext import (
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Prefer an environment variable so you never hardcode your token in code
-# you might share or commit to git. Falls back to a placeholder string.
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
+# On Railway, set TELEGRAM_BOT_TOKEN in the project's Variables tab.
+# Locally, set it in your shell or a .env file (never commit the real token).
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 BOT_USERNAME = "@kennydeebot"
 
 DICTIONARY_API_URL = "https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
@@ -195,11 +203,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    if BOT_TOKEN == "PUT_YOUR_TOKEN_HERE":
-        raise SystemExit(
-            "Please set the TELEGRAM_BOT_TOKEN environment variable "
-            "(or edit BOT_TOKEN in bot.py) with the token from @BotFather."
+    if not BOT_TOKEN:
+        logger.error(
+            "TELEGRAM_BOT_TOKEN is not set. On Railway, add it in "
+            "Project → Variables. Locally, export it in your shell."
         )
+        sys.exit(1)
 
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -210,7 +219,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_plain_text))
     application.add_error_handler(error_handler)
 
-    logger.info("Bot starting...")
+    logger.info("@kennydeebot starting (polling mode)...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
